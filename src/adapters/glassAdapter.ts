@@ -97,7 +97,7 @@ export class GlassAdapterImpl implements GlassAdapter {
       height: GLASS_LAYOUT.height,
       containerID: CONTAINER_IDS.content,
       containerName: CONTAINER_NAMES.content,
-      isEventCapture: 1,
+      isEventCapture: 0,
       content: pageText.slice(0, 1000), // startup/rebuild limit: 1000 chars
     });
 
@@ -240,7 +240,7 @@ export class GlassAdapterImpl implements GlassAdapter {
       height: GLASS_LAYOUT.statusHeight,
       containerID: CONTAINER_IDS.status,
       containerName: CONTAINER_NAMES.status,
-      isEventCapture: 0,
+      isEventCapture: 1,
       content: status.left.slice(0, 1000),
     });
 
