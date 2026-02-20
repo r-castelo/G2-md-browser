@@ -13,8 +13,8 @@ export const GLASS_LAYOUT = {
 } as const;
 
 export const TEXT_LAYOUT = {
-  /** Characters per display line. ~400-500 chars fill a full 576×288 container. */
-  CHARS_PER_LINE: 40,
+  /** Characters per display line. ~64 chars fills a 560px container at SDK default font. */
+  CHARS_PER_LINE: 64,
   /** Lines per page. Aim for ~320-400 chars per page for comfortable reading. */
   LINES_PER_PAGE: 8,
 } as const;
@@ -29,11 +29,13 @@ export const TIMING = {
 export const CONTAINER_IDS = {
   content: 1,
   status: 2,
+  statusRight: 3,
 } as const;
 
 export const CONTAINER_NAMES = {
   content: "content",
   status: "status",
+  statusRight: "statusR",
 } as const;
 
 export const STORAGE_KEYS = {

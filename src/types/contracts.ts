@@ -37,12 +37,17 @@ export interface ReaderView {
   fileName: string;
 }
 
+export interface StatusBar {
+  left: string;
+  right: string;
+}
+
 export interface GlassAdapter {
   connect(): Promise<void>;
   onGesture(handler: (event: GestureEvent) => void): Unsubscribe;
   showBrowser(items: string[], statusText: string): Promise<void>;
-  showReader(pageText: string, statusText: string): Promise<void>;
-  updateReaderText(pageText: string, statusText: string): Promise<void>;
+  showReader(pageText: string, status: StatusBar): Promise<void>;
+  updateReaderText(pageText: string, status: StatusBar): Promise<void>;
   showMenu(items: string[], statusText: string): Promise<void>;
   showMessage(text: string): Promise<void>;
 }

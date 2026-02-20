@@ -17,7 +17,7 @@ import {
   GLASS_LAYOUT,
   TIMING,
 } from "../config/constants";
-import type { GestureEvent, GlassAdapter, Unsubscribe } from "../types/contracts";
+import type { GestureEvent, GlassAdapter, StatusBar, Unsubscribe } from "../types/contracts";
 
 type RenderMode = "browser" | "reader" | "menu" | null;
 
@@ -87,8 +87,9 @@ export class GlassAdapterImpl implements GlassAdapter {
   /**
    * Show reader mode — full rebuild for mode change.
    * Call this when entering reader from browser/menu.
+   * Uses 3 containers: content + left status (file name) + right status (page).
    */
-  async showReader(pageText: string, statusText: string): Promise<void> {
+  async showReader(pageText: string, status: StatusBar): Promise<void> {
     const readerContainer = new TextContainerProperty({
       xPosition: GLASS_LAYOUT.x,
       yPosition: GLASS_LAYOUT.y,
@@ -100,10 +101,10 @@ export class GlassAdapterImpl implements GlassAdapter {
       content: pageText.slice(0, 1000), // startup/rebuild limit: 1000 chars
     });
 
-    const statusContainer = this.makeStatusContainer(statusText);
+    const [statusLeft, statusRight] = this.makeSplitStatus(status);
 
     await this.renderContainers({
-      textObject: [readerContainer, statusContainer],
+      textObject: [readerContainer, statusLeft, statusRight],
     });
     this.currentMode = "reader";
   }
@@ -115,7 +116,7 @@ export class GlassAdapterImpl implements GlassAdapter {
    */
   async updateReaderText(
     pageText: string,
-    statusText: string,
+    status: StatusBar,
   ): Promise<void> {
     if (!this.bridge) {
       throw new Error("Not connected");
@@ -136,8 +137,18 @@ export class GlassAdapterImpl implements GlassAdapter {
         containerID: CONTAINER_IDS.status,
         containerName: CONTAINER_NAMES.status,
         contentOffset: 0,
-        contentLength: statusText.length,
-        content: statusText.slice(0, 2000),
+        contentLength: status.left.length,
+        content: status.left.slice(0, 2000),
+      }),
+    );
+
+    await this.bridge.textContainerUpgrade(
+      new TextContainerUpgrade({
+        containerID: CONTAINER_IDS.statusRight,
+        containerName: CONTAINER_NAMES.statusRight,
+        contentOffset: 0,
+        contentLength: status.right.length,
+        content: status.right.slice(0, 2000),
       }),
     );
   }
@@ -207,6 +218,44 @@ export class GlassAdapterImpl implements GlassAdapter {
       isEventCapture: 0,
       content: text.slice(0, 1000),
     });
+  }
+
+  /**
+   * Create two status containers for reader mode:
+   * - Left container: file name, positioned at left edge
+   * - Right container: page info, positioned so text ends at right edge
+   *
+   * Uses ~8.75px per character (560px / 64 chars) to calculate width.
+   */
+  private makeSplitStatus(status: StatusBar): [TextContainerProperty, TextContainerProperty] {
+    const charWidth = GLASS_LAYOUT.width / 64;
+    const rightWidth = Math.ceil(status.right.length * charWidth) + 16; // +padding
+    const rightX = GLASS_LAYOUT.x + GLASS_LAYOUT.width - rightWidth;
+    const leftWidth = rightX - GLASS_LAYOUT.x;
+
+    const left = new TextContainerProperty({
+      xPosition: GLASS_LAYOUT.x,
+      yPosition: GLASS_LAYOUT.statusY,
+      width: Math.max(leftWidth, 40),
+      height: GLASS_LAYOUT.statusHeight,
+      containerID: CONTAINER_IDS.status,
+      containerName: CONTAINER_NAMES.status,
+      isEventCapture: 0,
+      content: status.left.slice(0, 1000),
+    });
+
+    const right = new TextContainerProperty({
+      xPosition: rightX,
+      yPosition: GLASS_LAYOUT.statusY,
+      width: rightWidth,
+      height: GLASS_LAYOUT.statusHeight,
+      containerID: CONTAINER_IDS.statusRight,
+      containerName: CONTAINER_NAMES.statusRight,
+      isEventCapture: 0,
+      content: status.right.slice(0, 1000),
+    });
+
+    return [left, right];
   }
 
   private async renderContainers(payload: {

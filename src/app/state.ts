@@ -153,13 +153,13 @@ export class AppStateMachine {
     for (const entry of this.state.entries) {
       if (entry.kind === "folder") {
         const display = entry.name + BROWSER_TEXT.folderSuffix;
-        const name = display.length > 28
-          ? `${display.slice(0, 25)}...`
+        const name = display.length > 48
+          ? `${display.slice(0, 45)}...`
           : display;
         items.push(name);
       } else {
-        const name = entry.name.length > 28
-          ? `${entry.name.slice(0, 25)}...`
+        const name = entry.name.length > 48
+          ? `${entry.name.slice(0, 45)}...`
           : entry.name;
         items.push(name);
       }

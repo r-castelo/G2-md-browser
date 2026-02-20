@@ -5,6 +5,7 @@ import { AppStateMachine } from "./state";
 import type {
   GestureEvent,
   GlassAdapter,
+  StatusBar,
   StorageAdapter,
   Unsubscribe,
 } from "../types/contracts";
@@ -191,7 +192,7 @@ export class Controller {
       status = `${total} items`;
     } else {
       const path = this.state.getCurrentPath();
-      status = path.length > 40 ? `...${path.slice(-37)}` : path;
+      status = path.length > 64 ? `...${path.slice(-61)}` : path;
     }
 
     await this.glass.showBrowser(items, status);
@@ -257,14 +258,13 @@ export class Controller {
     page: number,
     total: number,
     fileName: string,
-  ): string {
+  ): StatusBar {
     const name =
-      fileName.length > 20 ? `${fileName.slice(0, 17)}...` : fileName;
-    const text = `${name}  ${page + 1}/${total}`;
-    const STATUS_CHARS = 40;
-    return text.length < STATUS_CHARS
-      ? " ".repeat(STATUS_CHARS - text.length) + text
-      : text;
+      fileName.length > 36 ? `${fileName.slice(0, 33)}...` : fileName;
+    return {
+      left: name,
+      right: `${page + 1}/${total}`,
+    };
   }
 
   // --- Menu mode ---
