@@ -26,6 +26,11 @@ interface BrowserFileRecord {
   file: File;
 }
 
+const FSAPI_PREFIX = "fsapi://";
+const HANDLE_DB_NAME = "g2_md_browser_handles";
+const HANDLE_STORE = "dir_handles";
+const HANDLE_KEY = "root";
+
 function detectNativeBridge(
   windowRef?: Window,
 ): NativeStorageBridge | undefined {
@@ -44,12 +49,68 @@ function detectNativeBridge(
   return undefined;
 }
 
+/**
+ * Check if the File System Access API (showDirectoryPicker) is available.
+ */
+function hasFSAPI(): boolean {
+  return typeof showDirectoryPicker === "function";
+}
+
+// --- IndexedDB helpers for persisting FileSystemDirectoryHandle ---
+
+function openHandleDB(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(HANDLE_DB_NAME, 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(HANDLE_STORE)) {
+        db.createObjectStore(HANDLE_STORE);
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function persistDirectoryHandle(
+  handle: FileSystemDirectoryHandle,
+): Promise<void> {
+  const db = await openHandleDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(HANDLE_STORE, "readwrite");
+    tx.objectStore(HANDLE_STORE).put(handle, HANDLE_KEY);
+    tx.oncomplete = () => { db.close(); resolve(); };
+    tx.onerror = () => { db.close(); reject(tx.error); };
+  });
+}
+
+async function loadDirectoryHandle(): Promise<FileSystemDirectoryHandle | null> {
+  try {
+    const db = await openHandleDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(HANDLE_STORE, "readonly");
+      const req = tx.objectStore(HANDLE_STORE).get(HANDLE_KEY);
+      req.onsuccess = () => {
+        db.close();
+        const handle = req.result as FileSystemDirectoryHandle | undefined;
+        resolve(handle ?? null);
+      };
+      req.onerror = () => { db.close(); reject(req.error); };
+    });
+  } catch {
+    return null;
+  }
+}
+
 export class StorageAdapterImpl implements StorageAdapter {
   private readonly windowRef: Window | undefined;
   private readonly nativeBridge: NativeStorageBridge | undefined;
 
   /** All .md files from the picked folder, keyed by root folder URI. */
   private readonly allBrowserFiles = new Map<string, BrowserFileRecord[]>();
+
+  /** Active FSAPI directory handle, keyed by root folder URI. */
+  private readonly fsapiHandles = new Map<string, FileSystemDirectoryHandle>();
 
   constructor(windowRef?: Window) {
     this.windowRef =
@@ -58,6 +119,7 @@ export class StorageAdapterImpl implements StorageAdapter {
   }
 
   async pickFolder(): Promise<string> {
+    // Tier 1: Native bridge (Even Realities host app)
     if (this.nativeBridge?.pickFolder) {
       const treeUri = await this.nativeBridge.pickFolder();
       if (!treeUri) {
@@ -66,6 +128,22 @@ export class StorageAdapterImpl implements StorageAdapter {
       return treeUri;
     }
 
+    // Tier 2: File System Access API (showDirectoryPicker)
+    if (hasFSAPI()) {
+      try {
+        return await this.pickFolderViaFSAPI();
+      } catch (err) {
+        // If user cancelled, re-throw
+        if (err instanceof DOMException && err.name === "AbortError") {
+          throw new Error("Folder selection was cancelled.");
+        }
+        // If FSAPI failed (e.g. Android WebView not supporting it yet),
+        // fall through to webkitdirectory input
+        console.warn("[storage] showDirectoryPicker failed, falling back:", err);
+      }
+    }
+
+    // Tier 3: webkitdirectory input (desktop browsers)
     return this.pickFolderViaInput();
   }
 
@@ -106,6 +184,11 @@ export class StorageAdapterImpl implements StorageAdapter {
       );
     }
 
+    // FSAPI path
+    if (folderUri.startsWith(FSAPI_PREFIX)) {
+      return this.listFSAPIFolderContents(folderUri);
+    }
+
     return this.listBrowserFolderContents(folderUri);
   }
 
@@ -122,7 +205,12 @@ export class StorageAdapterImpl implements StorageAdapter {
       );
     }
 
-    const { rootUri } = this.parsefolderUri(rootFolderUri);
+    // FSAPI path
+    if (rootFolderUri.startsWith(FSAPI_PREFIX)) {
+      return this.getAllFSAPIFiles(rootFolderUri);
+    }
+
+    const { rootUri } = this.parseFolderUri(rootFolderUri);
     const records = this.allBrowserFiles.get(rootUri);
     if (!records) return [];
 
@@ -139,6 +227,11 @@ export class StorageAdapterImpl implements StorageAdapter {
   async readFile(uri: string): Promise<string> {
     if (this.nativeBridge?.readFile) {
       return this.nativeBridge.readFile(uri);
+    }
+
+    // FSAPI path
+    if (uri.startsWith(FSAPI_PREFIX)) {
+      return this.readFSAPIFile(uri);
     }
 
     for (const records of this.allBrowserFiles.values()) {
@@ -174,10 +267,189 @@ export class StorageAdapterImpl implements StorageAdapter {
       return null;
     }
 
+    // If it's an FSAPI URI, restore the directory handle from IndexedDB
+    if (value.startsWith(FSAPI_PREFIX)) {
+      const restored = await this.restoreFSAPIHandle(value);
+      if (!restored) {
+        // Handle expired or permission denied — clear persisted URI
+        this.windowRef.localStorage.removeItem(STORAGE_KEYS.folderUri);
+        return null;
+      }
+    }
+
     return value;
   }
 
-  // --- Private: browser fallback ---
+  // --- Private: File System Access API ---
+
+  private async pickFolderViaFSAPI(): Promise<string> {
+    const handle = await showDirectoryPicker({ mode: "read" });
+    const folderUri = `${FSAPI_PREFIX}${handle.name}-${Date.now()}`;
+
+    this.fsapiHandles.set(folderUri, handle);
+
+    // Persist handle in IndexedDB for cross-session restoration
+    try {
+      await persistDirectoryHandle(handle);
+    } catch (err) {
+      console.warn("[storage] Failed to persist directory handle:", err);
+    }
+
+    return folderUri;
+  }
+
+  /**
+   * Restore an FSAPI directory handle from IndexedDB and re-request permission.
+   * Returns true if successful, false if handle is gone or permission denied.
+   */
+  private async restoreFSAPIHandle(folderUri: string): Promise<boolean> {
+    try {
+      const handle = await loadDirectoryHandle();
+      if (!handle) return false;
+
+      // Re-request read permission — may show a brief confirmation dialog
+      const perm = await handle.requestPermission({ mode: "read" });
+      if (perm !== "granted") return false;
+
+      this.fsapiHandles.set(folderUri, handle);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Navigate to a subdirectory handle from the root handle.
+   */
+  private async resolveSubdirHandle(
+    folderUri: string,
+  ): Promise<FileSystemDirectoryHandle> {
+    const { rootUri, subPath } = this.parseFolderUri(folderUri);
+    const rootHandle = this.fsapiHandles.get(rootUri);
+    if (!rootHandle) {
+      throw new Error(
+        "Folder access is no longer valid. Please select the folder again.",
+      );
+    }
+
+    if (!subPath) return rootHandle;
+
+    // Walk down the path segments
+    let current = rootHandle;
+    for (const segment of subPath.split("/")) {
+      current = await current.getDirectoryHandle(segment);
+    }
+    return current;
+  }
+
+  /**
+   * List direct children of a FSAPI-backed folder.
+   */
+  private async listFSAPIFolderContents(
+    folderUri: string,
+  ): Promise<BrowserEntry[]> {
+    const dirHandle = await this.resolveSubdirHandle(folderUri);
+    const { rootUri, subPath } = this.parseFolderUri(folderUri);
+
+    const folders: BrowserEntry[] = [];
+    const files: BrowserEntry[] = [];
+
+    for await (const [name, childHandle] of dirHandle.entries()) {
+      if (childHandle.kind === "directory") {
+        folders.push({
+          kind: "folder",
+          name,
+          uri: subPath
+            ? `${rootUri}/${subPath}/${name}`
+            : `${rootUri}/${name}`,
+          sizeBytes: 0,
+        });
+      } else if (name.toLowerCase().endsWith(".md")) {
+        const file = await childHandle.getFile();
+        files.push({
+          kind: "file",
+          name,
+          uri: subPath
+            ? `${rootUri}/${subPath}/${name}`
+            : `${rootUri}/${name}`,
+          sizeBytes: file.size,
+        });
+      }
+    }
+
+    folders.sort((a, b) => a.name.localeCompare(b.name));
+    files.sort((a, b) => a.name.localeCompare(b.name));
+    return [...folders, ...files];
+  }
+
+  /**
+   * Recursively list all .md files under a FSAPI-backed folder.
+   */
+  private async getAllFSAPIFiles(
+    rootFolderUri: string,
+  ): Promise<BrowserEntry[]> {
+    const { rootUri } = this.parseFolderUri(rootFolderUri);
+    const rootHandle = this.fsapiHandles.get(rootUri);
+    if (!rootHandle) return [];
+
+    const results: BrowserEntry[] = [];
+    await this.walkFSAPIDir(rootHandle, rootUri, "", results);
+    results.sort((a, b) => a.name.localeCompare(b.name));
+    return results;
+  }
+
+  private async walkFSAPIDir(
+    dirHandle: FileSystemDirectoryHandle,
+    rootUri: string,
+    currentPath: string,
+    results: BrowserEntry[],
+  ): Promise<void> {
+    for await (const [name, childHandle] of dirHandle.entries()) {
+      const childPath = currentPath ? `${currentPath}/${name}` : name;
+      if (childHandle.kind === "directory") {
+        await this.walkFSAPIDir(childHandle, rootUri, childPath, results);
+      } else if (name.toLowerCase().endsWith(".md")) {
+        const file = await childHandle.getFile();
+        results.push({
+          kind: "file",
+          name,
+          uri: `${rootUri}/${childPath}`,
+          sizeBytes: file.size,
+        });
+      }
+    }
+  }
+
+  /**
+   * Read a file from a FSAPI-backed folder.
+   * URI format: "fsapi://name-123/path/to/file.md"
+   */
+  private async readFSAPIFile(uri: string): Promise<string> {
+    const { rootUri, subPath } = this.parseFolderUri(uri);
+    if (!subPath) {
+      throw new Error(`Invalid FSAPI file URI: ${uri}`);
+    }
+
+    const rootHandle = this.fsapiHandles.get(rootUri);
+    if (!rootHandle) {
+      throw new Error(
+        "Folder access is no longer valid. Please select the folder again.",
+      );
+    }
+
+    // Walk to the file: "path/to/file.md" → ["path", "to"] dirs + "file.md" file
+    const segments = subPath.split("/");
+    const fileName = segments.pop()!;
+    let current: FileSystemDirectoryHandle = rootHandle;
+    for (const segment of segments) {
+      current = await current.getDirectoryHandle(segment);
+    }
+    const fileHandle = await current.getFileHandle(fileName);
+    const file = await fileHandle.getFile();
+    return file.text();
+  }
+
+  // --- Private: browser fallback (webkitdirectory) ---
 
   private async pickFolderViaInput(): Promise<string> {
     if (!this.windowRef?.document) {
@@ -304,7 +576,7 @@ export class StorageAdapterImpl implements StorageAdapter {
    */
   private listBrowserFolderContents(folderUri: string): BrowserEntry[] {
     // Parse: "webfolder://root-123" or "webfolder://root-123/sub/path"
-    const { rootUri, subPath } = this.parsefolderUri(folderUri);
+    const { rootUri, subPath } = this.parseFolderUri(folderUri);
 
     const allRecords = this.allBrowserFiles.get(rootUri);
     if (!allRecords) {
@@ -359,16 +631,31 @@ export class StorageAdapterImpl implements StorageAdapter {
     return [...folderEntries, ...files];
   }
 
+  // --- Private: URI parsing ---
+
   /**
    * Parse a folder URI into root URI and optional sub-path.
+   * Works for both "webfolder://" and "fsapi://" schemes.
+   *
+   * "fsapi://name-123" → { rootUri: "fsapi://name-123", subPath: "" }
+   * "fsapi://name-123/sub/path" → { rootUri: "fsapi://name-123", subPath: "sub/path" }
    * "webfolder://x-123" → { rootUri: "webfolder://x-123", subPath: "" }
-   * "webfolder://x-123/sub/path" → { rootUri: "webfolder://x-123", subPath: "sub/path" }
    */
-  private parsefolderUri(folderUri: string): {
+  private parseFolderUri(folderUri: string): {
     rootUri: string;
     subPath: string;
   } {
-    // Find the root URI among our cached folders
+    // Check FSAPI handles first
+    for (const rootUri of this.fsapiHandles.keys()) {
+      if (folderUri === rootUri) {
+        return { rootUri, subPath: "" };
+      }
+      if (folderUri.startsWith(rootUri + "/")) {
+        return { rootUri, subPath: folderUri.slice(rootUri.length + 1) };
+      }
+    }
+
+    // Check browser file cache
     for (const rootUri of this.allBrowserFiles.keys()) {
       if (folderUri === rootUri) {
         return { rootUri, subPath: "" };
@@ -381,6 +668,8 @@ export class StorageAdapterImpl implements StorageAdapter {
     // Might be a native URI — return as-is
     return { rootUri: folderUri, subPath: "" };
   }
+
+  // --- Private: webkitdirectory helpers ---
 
   private extractRootSegment(file: File | undefined): string {
     if (!file) return "markdown";
@@ -401,6 +690,8 @@ export class StorageAdapterImpl implements StorageAdapter {
     return (file as File & { webkitRelativePath?: string })
       .webkitRelativePath ?? "";
   }
+
+  // --- Private: native bridge helpers ---
 
   private normalizeNativeFiles(files: NativeFileDescriptor[]): FileEntry[] {
     return files
