@@ -1,0 +1,19 @@
+{
+  "package_id": "com.renato.g2mdbrowser",
+  "edition": "202601",
+  "name": "G2 Markdown Browser",
+  "version": "0.1.0",
+  "min_app_version": "0.1.0",
+  "tagline": "Read markdown files on G2 glasses",
+  "description": "Browse folders, open markdown files, and read with page-flip navigation on Even Realities G2.",
+  "author": "Renato Castelo Branco Camargo Pereira",
+  "entrypoint": "index.html",
+  "permissions": {
+    "network": [
+      "evenhub.evenrealities.com"
+    ],
+    "fs": [
+      "./"
+    ]
+  }
+}

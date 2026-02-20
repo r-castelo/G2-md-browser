@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+    <title>G2 Markdown Browser</title>
+    <style>
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body {
+        font-family: -apple-system, "SF Pro Display", "Helvetica Neue", sans-serif;
+        color: #e8e8e8;
+        background: #0a0a0a;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+      }
+
+      /* --- Status screen --- */
+      .phone-header {
+        padding: 48px 24px 16px;
+        text-align: center;
+      }
+      .phone-header h1 {
+        font-size: 20px;
+        font-weight: 700;
+        letter-spacing: -0.3px;
+        color: #fff;
+      }
+      .phone-header .subtitle {
+        font-size: 13px;
+        color: #888;
+        margin-top: 4px;
+      }
+      .phone-status {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        gap: 16px;
+      }
+      .status-indicator {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: #555;
+        transition: background 0.3s;
+      }
+      .status-indicator.connecting {
+        background: #f5a623;
+        animation: pulse 1.5s ease-in-out infinite;
+      }
+      .status-indicator.connected { background: #4cd964; }
+      .status-indicator.error { background: #ff3b30; }
+      @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.3; }
+      }
+      .status-text {
+        font-size: 15px;
+        color: #aaa;
+        text-align: center;
+        line-height: 1.5;
+      }
+      .status-detail {
+        font-size: 12px;
+        color: #666;
+        text-align: center;
+        max-width: 280px;
+      }
+
+      /* --- Phone file browser --- */
+      .phone-browser {
+        display: flex;
+        flex-direction: column;
+        flex: 1;
+        overflow: hidden;
+      }
+      .browser-toolbar {
+        padding: 12px 16px 0;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .toolbar-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .search-bar {
+        position: relative;
+        flex: 1;
+      }
+      .search-bar input {
+        width: 100%;
+        padding: 10px 12px 10px 36px;
+        border: 1px solid #333;
+        border-radius: 10px;
+        background: #1c1c1e;
+        color: #e8e8e8;
+        font: 400 15px -apple-system, sans-serif;
+        outline: none;
+        -webkit-appearance: none;
+      }
+      .search-bar input::placeholder { color: #666; }
+      .search-bar input:focus { border-color: #555; }
+      .search-bar::before {
+        content: "\1F50D";
+        position: absolute;
+        left: 10px;
+        top: 50%;
+        transform: translateY(-50%);
+        font-size: 14px;
+        opacity: 0.5;
+        pointer-events: none;
+      }
+
+      /* --- Tab bar --- */
+      .tab-bar {
+        display: flex;
+        border-bottom: 1px solid #1c1c1e;
+        padding: 0 16px;
+      }
+      .tab-btn {
+        flex: 1;
+        padding: 10px 0;
+        border: none;
+        background: transparent;
+        color: #666;
+        font: 500 13px -apple-system, sans-serif;
+        cursor: pointer;
+        text-align: center;
+        border-bottom: 2px solid transparent;
+        -webkit-tap-highlight-color: transparent;
+        transition: color 0.15s, border-color 0.15s;
+      }
+      .tab-btn.active {
+        color: #e8e8e8;
+        border-bottom-color: #0a84ff;
+      }
+      .tab-btn:active { opacity: 0.6; }
+
+      .breadcrumbs {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        font-size: 12px;
+        color: #888;
+        overflow-x: auto;
+        white-space: nowrap;
+        padding: 6px 16px;
+        -webkit-overflow-scrolling: touch;
+      }
+      .breadcrumbs .crumb {
+        color: #0a84ff;
+        cursor: pointer;
+        -webkit-tap-highlight-color: transparent;
+      }
+      .breadcrumbs .crumb:active { opacity: 0.6; }
+      .breadcrumbs .crumb.current {
+        color: #aaa;
+        cursor: default;
+      }
+      .breadcrumbs .sep { color: #555; }
+
+      .file-list {
+        flex: 1;
+        overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
+      }
+      .file-item {
+        display: flex;
+        align-items: center;
+        padding: 12px 16px;
+        border-bottom: 1px solid #1a1a1a;
+        cursor: pointer;
+        -webkit-tap-highlight-color: transparent;
+        transition: background 0.1s;
+        gap: 12px;
+      }
+      .file-item:active { background: #1c1c1e; }
+      .file-item-icon {
+        width: 32px;
+        height: 32px;
+        border-radius: 8px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 16px;
+        flex-shrink: 0;
+      }
+      .file-item-icon.folder {
+        background: #1c3a5f;
+        color: #4da6ff;
+      }
+      .file-item-icon.file {
+        background: #2c2c2e;
+        color: #aaa;
+      }
+      .file-item-info {
+        flex: 1;
+        min-width: 0;
+      }
+      .file-item-name {
+        font-size: 15px;
+        color: #e8e8e8;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .file-item-path {
+        font-size: 11px;
+        color: #666;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        margin-top: 2px;
+      }
+      .file-item-star {
+        width: 36px;
+        height: 36px;
+        border: none;
+        background: transparent;
+        color: #555;
+        font-size: 18px;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+        -webkit-tap-highlight-color: transparent;
+        transition: color 0.15s;
+      }
+      .file-item-star.active { color: #ffcc00; }
+      .file-item-star:active { opacity: 0.6; }
+      .file-item-parent .file-item-icon {
+        background: #1c1c1e;
+        color: #888;
+        font-size: 18px;
+        font-weight: 700;
+      }
+      .file-item-parent .file-item-name {
+        color: #888;
+      }
+      .file-list-empty {
+        padding: 48px 24px;
+        text-align: center;
+        color: #666;
+        font-size: 14px;
+      }
+
+      .browser-footer {
+        padding: 12px 16px 32px;
+        border-top: 1px solid #1c1c1e;
+      }
+
+      /* --- Confirm dialog --- */
+      .confirm-overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(0,0,0,0.7);
+        display: flex;
+        align-items: flex-end;
+        justify-content: center;
+        z-index: 1000;
+        padding: 16px;
+        -webkit-tap-highlight-color: transparent;
+      }
+      .confirm-sheet {
+        width: 100%;
+        max-width: 400px;
+        background: #1c1c1e;
+        border-radius: 14px;
+        overflow: hidden;
+        margin-bottom: 16px;
+      }
+      .confirm-body {
+        padding: 20px 16px 16px;
+        text-align: center;
+      }
+      .confirm-title {
+        font-size: 16px;
+        font-weight: 600;
+        color: #fff;
+        margin-bottom: 4px;
+      }
+      .confirm-subtitle {
+        font-size: 13px;
+        color: #888;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .confirm-actions {
+        display: flex;
+        flex-direction: column;
+      }
+      .confirm-btn {
+        padding: 14px;
+        border: none;
+        background: transparent;
+        font: 500 16px -apple-system, sans-serif;
+        cursor: pointer;
+        text-align: center;
+        -webkit-tap-highlight-color: transparent;
+        border-top: 1px solid #333;
+      }
+      .confirm-btn:active { background: #2c2c2e; }
+      .confirm-btn.primary { color: #0a84ff; font-weight: 600; }
+      .confirm-btn.cancel { color: #aaa; }
+
+      /* --- Shared --- */
+      .btn-secondary {
+        display: block;
+        width: 100%;
+        padding: 14px;
+        border: 1px solid #333;
+        border-radius: 12px;
+        background: transparent;
+        color: #aaa;
+        font: 500 14px -apple-system, sans-serif;
+        text-align: center;
+        cursor: pointer;
+        -webkit-tap-highlight-color: transparent;
+        transition: background 0.15s, border-color 0.15s;
+      }
+      .btn-secondary:active {
+        background: #1a1a1a;
+        border-color: #555;
+      }
+      .hidden { display: none !important; }
+    </style>
+  </head>
+  <body>
+    <!-- Status screen -->
+    <div id="status-screen">
+      <div class="phone-header">
+        <h1>G2 MD Reader</h1>
+        <div class="subtitle">Markdown reader for Even Realities G2</div>
+      </div>
+      <div class="phone-status" id="status-area">
+        <div class="status-indicator connecting" id="status-dot"></div>
+        <div class="status-text" id="status-text">Connecting to glasses...</div>
+        <div class="status-detail" id="status-detail"></div>
+      </div>
+    </div>
+
+    <!-- Phone file browser -->
+    <div id="phone-browser" class="phone-browser hidden">
+      <div class="browser-toolbar">
+        <div class="toolbar-row">
+          <div class="search-bar">
+            <input type="text" id="search-input" placeholder="Search files..." autocomplete="off" />
+          </div>
+        </div>
+      </div>
+      <div class="tab-bar">
+        <button class="tab-btn active" id="tab-files">Files</button>
+        <button class="tab-btn" id="tab-favorites">Favorites</button>
+      </div>
+      <div id="breadcrumbs" class="breadcrumbs"></div>
+      <div id="file-list" class="file-list"></div>
+      <div class="browser-footer">
+        <button class="btn-secondary" id="btn-change-folder">Change folder</button>
+      </div>
+    </div>
+
+    <!-- Confirm dialog (hidden, shown on file tap) -->
+    <div id="confirm-dialog" class="confirm-overlay hidden">
+      <div class="confirm-sheet">
+        <div class="confirm-body">
+          <div class="confirm-title">Open on glasses?</div>
+          <div class="confirm-subtitle" id="confirm-filename"></div>
+        </div>
+        <div class="confirm-actions">
+          <button class="confirm-btn primary" id="confirm-yes">Open</button>
+          <button class="confirm-btn cancel" id="confirm-no">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
