@@ -8,7 +8,12 @@ export type AppMode =
   | "MENU"
   | "ERROR";
 
-export type GestureKind = "SCROLL_FWD" | "SCROLL_BACK" | "TAP";
+export type GestureKind =
+  | "SCROLL_FWD"
+  | "SCROLL_BACK"
+  | "TAP"
+  | "FOREGROUND_ENTER"
+  | "FOREGROUND_EXIT";
 
 export interface GestureEvent {
   kind: GestureKind;

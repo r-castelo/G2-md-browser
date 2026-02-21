@@ -369,6 +369,14 @@ export class GlassAdapterImpl implements GlassAdapter {
       return { kind: "TAP", listIndex: event.listEvent?.currentSelectItemIndex };
     }
 
+    if (eventType === OsEventTypeList.FOREGROUND_ENTER_EVENT) {
+      return { kind: "FOREGROUND_ENTER" };
+    }
+
+    if (eventType === OsEventTypeList.FOREGROUND_EXIT_EVENT) {
+      return { kind: "FOREGROUND_EXIT" };
+    }
+
     return null;
   }
 

@@ -1,6 +1,7 @@
 import { Controller } from "./app/controller";
 import { GlassAdapterImpl } from "./adapters/glassAdapter";
 import { StorageAdapterImpl } from "./adapters/storageAdapter";
+import { WakeLockServiceImpl } from "./services/wakeLockService";
 import { PhoneUI, setPhoneState } from "./phone/phoneUI";
 
 async function bootstrap(): Promise<void> {
@@ -8,7 +9,8 @@ async function bootstrap(): Promise<void> {
 
   const glass = new GlassAdapterImpl();
   const storage = new StorageAdapterImpl();
-  const controller = new Controller({ glass, storage });
+  const wakeLock = new WakeLockServiceImpl();
+  const controller = new Controller({ glass, storage, wakeLock });
 
   let phoneUI: PhoneUI | null = null;
 

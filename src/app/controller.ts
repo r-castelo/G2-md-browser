@@ -9,15 +9,18 @@ import type {
   StorageAdapter,
   Unsubscribe,
 } from "../types/contracts";
+import type { WakeLockService } from "../services/wakeLockService";
 
 export interface ControllerOptions {
   glass: GlassAdapter;
   storage: StorageAdapter;
+  wakeLock?: WakeLockService;
 }
 
 export class Controller {
   private readonly glass: GlassAdapter;
   private readonly storage: StorageAdapter;
+  private readonly wakeLock: WakeLockService | null;
   private readonly state = new AppStateMachine();
 
   private unsubscribeGesture: Unsubscribe | null = null;
@@ -27,6 +30,7 @@ export class Controller {
   constructor(options: ControllerOptions) {
     this.glass = options.glass;
     this.storage = options.storage;
+    this.wakeLock = options.wakeLock ?? null;
   }
 
   async start(): Promise<void> {
@@ -50,6 +54,7 @@ export class Controller {
     this.started = false;
     this.unsubscribeGesture?.();
     this.unsubscribeGesture = null;
+    await this.wakeLock?.release();
   }
 
   /** Triggered from phone UI to re-pick a folder. */
@@ -108,6 +113,16 @@ export class Controller {
   // --- Gesture dispatch ---
 
   private async handleGesture(gesture: GestureEvent): Promise<void> {
+    // Foreground lifecycle events — handled regardless of mode
+    if (gesture.kind === "FOREGROUND_ENTER") {
+      await this.handleForegroundEnter();
+      return;
+    }
+    if (gesture.kind === "FOREGROUND_EXIT") {
+      await this.handleForegroundExit();
+      return;
+    }
+
     const mode = this.state.mode;
 
     if (mode === "BROWSER") {
@@ -210,6 +225,7 @@ export class Controller {
       this.state.enterReader(entry.name, pages);
       await this.restoreReadingState(entry.name);
       await this.renderReaderFull();
+      await this.wakeLock?.acquire();
     } catch (err: unknown) {
       console.error(`Failed to read file: ${entry.uri}`, err);
       this.state.backToBrowser();
@@ -286,6 +302,7 @@ export class Controller {
 
     if (menuItem === "Back to files") {
       this.state.backToBrowser();
+      await this.wakeLock?.release();
       await this.renderBrowser();
       return;
     }
@@ -305,6 +322,39 @@ export class Controller {
   private async renderMenu(): Promise<void> {
     const items = this.state.getMenuItems();
     await this.glass.showMenu(items, "Swipe: move  Tap: select");
+  }
+
+  // --- Foreground lifecycle ---
+
+  private async handleForegroundEnter(): Promise<void> {
+    console.log("[controller] Foreground enter");
+    const mode = this.state.mode;
+
+    // Re-acquire wake lock if we're in reader/menu
+    if (mode === "READER" || mode === "MENU") {
+      await this.wakeLock?.acquire();
+    }
+
+    // Re-render the glasses display (may have cleared while backgrounded)
+    if (mode === "READER") {
+      await this.renderReaderFull();
+    } else if (mode === "MENU") {
+      await this.renderMenu();
+    } else if (mode === "BROWSER") {
+      await this.renderBrowser();
+    }
+  }
+
+  private async handleForegroundExit(): Promise<void> {
+    console.log("[controller] Foreground exit");
+
+    // Persist reading state as safety measure
+    if (this.state.mode === "READER" || this.state.mode === "MENU") {
+      await this.persistReadingState();
+    }
+
+    // Release wake lock to save battery while backgrounded
+    await this.wakeLock?.release();
   }
 
   // --- Reading state persistence ---
