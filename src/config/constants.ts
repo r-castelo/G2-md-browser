@@ -42,6 +42,7 @@ export const STORAGE_KEYS = {
   folderUri: "g2_md_browser.folder_uri",
   readingState: "g2_md_browser.reading",
   favorites: "g2_md_browser.favorites",
+  storageSource: "g2_md_browser.storage_source",
 } as const;
 
 export const MENU_ITEMS = [

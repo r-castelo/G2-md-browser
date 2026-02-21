@@ -1,4 +1,6 @@
 import { STORAGE_KEYS } from "../config/constants";
+import { GDRIVE_PREFIX } from "../config/gdriveConfig";
+import type { GoogleDriveService } from "../services/googleDriveService";
 import type { BrowserEntry, FileEntry, StorageAdapter } from "../types/contracts";
 
 interface NativeFileDescriptor {
@@ -105,6 +107,7 @@ async function loadDirectoryHandle(): Promise<FileSystemDirectoryHandle | null> 
 export class StorageAdapterImpl implements StorageAdapter {
   private readonly windowRef: Window | undefined;
   private readonly nativeBridge: NativeStorageBridge | undefined;
+  private gdrive: GoogleDriveService | null = null;
 
   /** All .md files from the picked folder, keyed by root folder URI. */
   private readonly allBrowserFiles = new Map<string, BrowserFileRecord[]>();
@@ -112,10 +115,25 @@ export class StorageAdapterImpl implements StorageAdapter {
   /** Active FSAPI directory handle, keyed by root folder URI. */
   private readonly fsapiHandles = new Map<string, FileSystemDirectoryHandle>();
 
-  constructor(windowRef?: Window) {
+  constructor(windowRef?: Window, gdrive?: GoogleDriveService) {
     this.windowRef =
       windowRef ?? (typeof window !== "undefined" ? window : undefined);
     this.nativeBridge = detectNativeBridge(this.windowRef);
+    this.gdrive = gdrive ?? null;
+  }
+
+  /**
+   * Pick a folder from Google Drive. Returns a gdrive:// URI.
+   * If not authenticated, initiates OAuth redirect (never returns).
+   */
+  async pickGDriveFolder(): Promise<string> {
+    if (!this.gdrive) throw new Error("Google Drive not configured");
+    if (!this.gdrive.isAuthenticated()) {
+      await this.gdrive.startAuth();
+      // startAuth() redirects — this line is unreachable
+      throw new Error("Redirecting to Google sign-in...");
+    }
+    return `${GDRIVE_PREFIX}root`;
   }
 
   async pickFolder(): Promise<string> {
@@ -184,6 +202,11 @@ export class StorageAdapterImpl implements StorageAdapter {
       );
     }
 
+    // Google Drive path
+    if (folderUri.startsWith(GDRIVE_PREFIX)) {
+      return this.listGDriveFolderContents(folderUri);
+    }
+
     // FSAPI path
     if (folderUri.startsWith(FSAPI_PREFIX)) {
       return this.listFSAPIFolderContents(folderUri);
@@ -203,6 +226,11 @@ export class StorageAdapterImpl implements StorageAdapter {
           sizeBytes: f.sizeBytes,
         }),
       );
+    }
+
+    // Google Drive path
+    if (rootFolderUri.startsWith(GDRIVE_PREFIX)) {
+      return this.getAllGDriveFiles(rootFolderUri);
     }
 
     // FSAPI path
@@ -227,6 +255,11 @@ export class StorageAdapterImpl implements StorageAdapter {
   async readFile(uri: string): Promise<string> {
     if (this.nativeBridge?.readFile) {
       return this.nativeBridge.readFile(uri);
+    }
+
+    // Google Drive path
+    if (uri.startsWith(GDRIVE_PREFIX)) {
+      return this.readGDriveFile(uri);
     }
 
     // FSAPI path
@@ -265,6 +298,15 @@ export class StorageAdapterImpl implements StorageAdapter {
     const value = this.windowRef.localStorage.getItem(STORAGE_KEYS.folderUri);
     if (!value || value.trim().length === 0) {
       return null;
+    }
+
+    // If it's a Google Drive URI, verify we still have a refresh token
+    if (value.startsWith(GDRIVE_PREFIX)) {
+      if (!this.gdrive?.isAuthenticated()) {
+        this.windowRef.localStorage.removeItem(STORAGE_KEYS.folderUri);
+        return null;
+      }
+      return value;
     }
 
     // If it's an FSAPI URI, restore the directory handle from IndexedDB
@@ -447,6 +489,70 @@ export class StorageAdapterImpl implements StorageAdapter {
     const fileHandle = await current.getFileHandle(fileName);
     const file = await fileHandle.getFile();
     return file.text();
+  }
+
+  // --- Private: Google Drive ---
+
+  private async listGDriveFolderContents(
+    folderUri: string,
+  ): Promise<BrowserEntry[]> {
+    if (!this.gdrive) throw new Error("Google Drive not configured");
+
+    const folderId = folderUri.slice(GDRIVE_PREFIX.length);
+    const items = await this.gdrive.listFolder(folderId);
+
+    const folders: BrowserEntry[] = [];
+    const files: BrowserEntry[] = [];
+
+    for (const item of items) {
+      if (item.mimeType === "application/vnd.google-apps.folder") {
+        folders.push({
+          kind: "folder",
+          name: item.name,
+          uri: `${GDRIVE_PREFIX}${item.id}`,
+          sizeBytes: 0,
+        });
+      } else if (item.name.toLowerCase().endsWith(".md")) {
+        files.push({
+          kind: "file",
+          name: item.name,
+          uri: `${GDRIVE_PREFIX}${item.id}`,
+          sizeBytes: parseInt(item.size ?? "0", 10),
+        });
+      }
+    }
+
+    folders.sort((a, b) => a.name.localeCompare(b.name));
+    files.sort((a, b) => a.name.localeCompare(b.name));
+    return [...folders, ...files];
+  }
+
+  private async getAllGDriveFiles(
+    rootFolderUri: string,
+  ): Promise<BrowserEntry[]> {
+    if (!this.gdrive) throw new Error("Google Drive not configured");
+
+    const folderId = rootFolderUri.slice(GDRIVE_PREFIX.length);
+    const items = await this.gdrive.listAllMdFiles(folderId);
+
+    return items
+      .filter((f) => f.name.toLowerCase().endsWith(".md"))
+      .map(
+        (f): BrowserEntry => ({
+          kind: "file",
+          name: f.name,
+          uri: `${GDRIVE_PREFIX}${f.id}`,
+          sizeBytes: parseInt(f.size ?? "0", 10),
+        }),
+      )
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  private async readGDriveFile(uri: string): Promise<string> {
+    if (!this.gdrive) throw new Error("Google Drive not configured");
+
+    const fileId = uri.slice(GDRIVE_PREFIX.length);
+    return this.gdrive.readFile(fileId);
   }
 
   // --- Private: browser fallback (webkitdirectory) ---
@@ -635,16 +741,22 @@ export class StorageAdapterImpl implements StorageAdapter {
 
   /**
    * Parse a folder URI into root URI and optional sub-path.
-   * Works for both "webfolder://" and "fsapi://" schemes.
+   * Works for "webfolder://", "fsapi://", and "gdrive://" schemes.
    *
    * "fsapi://name-123" → { rootUri: "fsapi://name-123", subPath: "" }
    * "fsapi://name-123/sub/path" → { rootUri: "fsapi://name-123", subPath: "sub/path" }
    * "webfolder://x-123" → { rootUri: "webfolder://x-123", subPath: "" }
+   * "gdrive://folderId" → { rootUri: "gdrive://folderId", subPath: "" }
    */
   private parseFolderUri(folderUri: string): {
     rootUri: string;
     subPath: string;
   } {
+    // Google Drive URIs: each folder has its own ID, no sub-path parsing
+    if (folderUri.startsWith(GDRIVE_PREFIX)) {
+      return { rootUri: folderUri, subPath: "" };
+    }
+
     // Check FSAPI handles first
     for (const rootUri of this.fsapiHandles.keys()) {
       if (folderUri === rootUri) {

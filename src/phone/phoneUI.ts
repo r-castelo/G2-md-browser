@@ -1,10 +1,14 @@
 import { STORAGE_KEYS } from "../config/constants";
+import { GDRIVE_PREFIX } from "../config/gdriveConfig";
 import type { BrowserEntry, StorageAdapter } from "../types/contracts";
 
 export interface PhoneUIOptions {
   storage: StorageAdapter;
   onFileSelect: (entry: BrowserEntry) => void;
   onFolderChange: () => Promise<void>;
+  onGDriveSelect?: () => Promise<void>;
+  isGDriveAuthenticated?: () => boolean;
+  onGDriveSignOut?: () => void;
 }
 
 type ActiveTab = "files" | "favorites";
@@ -13,10 +17,14 @@ export class PhoneUI {
   private readonly storage: StorageAdapter;
   private readonly onFileSelect: (entry: BrowserEntry) => void;
   private readonly onFolderChange: () => Promise<void>;
+  private readonly onGDriveSelect: (() => Promise<void>) | null;
+  private readonly isGDriveAuthenticated: (() => boolean) | null;
+  private readonly onGDriveSignOut: (() => void) | null;
 
   private rootUri = "";
   private currentUri = "";
   private folderStack: string[] = [];
+  private folderNames = new Map<string, string>();
   private favorites = new Set<string>();
   private allFilesCache: BrowserEntry[] | null = null;
   private searchQuery = "";
@@ -41,6 +49,9 @@ export class PhoneUI {
     this.storage = options.storage;
     this.onFileSelect = options.onFileSelect;
     this.onFolderChange = options.onFolderChange;
+    this.onGDriveSelect = options.onGDriveSelect ?? null;
+    this.isGDriveAuthenticated = options.isGDriveAuthenticated ?? null;
+    this.onGDriveSignOut = options.onGDriveSignOut ?? null;
 
     this.fileListEl = document.getElementById("file-list")!;
     this.breadcrumbsEl = document.getElementById("breadcrumbs")!;
@@ -71,6 +82,7 @@ export class PhoneUI {
     this.browserEl.classList.remove("hidden");
 
     this.updateTabs();
+    this.updateGDriveStatus();
     await this.renderCurrentView();
   }
 
@@ -110,6 +122,22 @@ export class PhoneUI {
       });
     }
 
+    // Source picker dialog
+    this.bindSourcePicker();
+
+    // Google Drive sign out
+    const gdriveSignoutBtn = document.getElementById("btn-gdrive-signout");
+    if (gdriveSignoutBtn) {
+      gdriveSignoutBtn.addEventListener("click", () => {
+        this.onGDriveSignOut?.();
+        // Clear persisted folder and show source picker
+        localStorage.removeItem(STORAGE_KEYS.folderUri);
+        localStorage.removeItem(STORAGE_KEYS.storageSource);
+        this.updateGDriveStatus();
+        void this.handleFolderChange();
+      });
+    }
+
     // Confirm dialog
     this.confirmYes.addEventListener("click", () => {
       this.confirmDialog.classList.add("hidden");
@@ -134,6 +162,17 @@ export class PhoneUI {
   }
 
   private async handleFolderChange(): Promise<void> {
+    // If Google Drive is available, show source picker
+    if (this.onGDriveSelect) {
+      this.showSourcePicker();
+      return;
+    }
+
+    // No Google Drive option — go straight to local folder picker
+    await this.pickLocalFolder();
+  }
+
+  private async pickLocalFolder(): Promise<void> {
     this.browserEl.classList.add("hidden");
     this.statusEl.classList.remove("hidden");
     setPhoneState("connecting", "Selecting folder...");
@@ -145,10 +184,78 @@ export class PhoneUI {
     }
   }
 
+  private showSourcePicker(): void {
+    const picker = document.getElementById("source-picker");
+    if (picker) {
+      picker.classList.remove("hidden");
+    }
+  }
+
+  private hideSourcePicker(): void {
+    const picker = document.getElementById("source-picker");
+    if (picker) {
+      picker.classList.add("hidden");
+    }
+  }
+
+  private bindSourcePicker(): void {
+    const picker = document.getElementById("source-picker");
+    const localBtn = document.getElementById("source-local");
+    const gdriveBtn = document.getElementById("source-gdrive");
+    const cancelBtn = document.getElementById("source-cancel");
+
+    if (localBtn) {
+      localBtn.addEventListener("click", () => {
+        this.hideSourcePicker();
+        void this.pickLocalFolder();
+      });
+    }
+
+    if (gdriveBtn) {
+      gdriveBtn.addEventListener("click", () => {
+        this.hideSourcePicker();
+        if (this.onGDriveSelect) {
+          this.browserEl.classList.add("hidden");
+          this.statusEl.classList.remove("hidden");
+          setPhoneState("connecting", "Connecting to Google Drive...");
+          void this.onGDriveSelect().catch((err: unknown) => {
+            setPhoneState("error", "Google Drive failed", String(err));
+          });
+        }
+      });
+    }
+
+    if (cancelBtn) {
+      cancelBtn.addEventListener("click", () => {
+        this.hideSourcePicker();
+      });
+    }
+
+    // Dismiss on overlay tap
+    if (picker) {
+      picker.addEventListener("click", (e) => {
+        if (e.target === picker) {
+          this.hideSourcePicker();
+        }
+      });
+    }
+  }
+
+  private updateGDriveStatus(): void {
+    const statusEl = document.getElementById("gdrive-status");
+    if (!statusEl) return;
+
+    const isGDrive = this.rootUri.startsWith(GDRIVE_PREFIX);
+    statusEl.classList.toggle("hidden", !isGDrive);
+  }
+
   // --- Folder navigation ---
 
-  private async navigateTo(folderUri: string): Promise<void> {
+  private async navigateTo(folderUri: string, folderName?: string): Promise<void> {
     this.folderStack.push(folderUri);
+    if (folderName) {
+      this.folderNames.set(folderUri, folderName);
+    }
     this.currentUri = folderUri;
     this.searchQuery = "";
     this.searchInput.value = "";
@@ -275,7 +382,9 @@ export class PhoneUI {
       const crumb = document.createElement("span");
       const isLast = i === this.folderStack.length - 1;
       crumb.className = isLast ? "crumb current" : "crumb";
-      crumb.textContent = i === 0 ? "root" : this.extractFolderName(this.folderStack[i]!, this.folderStack[i - 1]!);
+      crumb.textContent = i === 0
+        ? (this.rootUri.startsWith(GDRIVE_PREFIX) ? "Google Drive" : "root")
+        : this.extractFolderName(this.folderStack[i]!, this.folderStack[i - 1]!);
 
       if (!isLast) {
         const targetUri = this.folderStack[i]!;
@@ -350,7 +459,7 @@ export class PhoneUI {
     // Tap handler
     row.addEventListener("click", () => {
       if (entry.kind === "folder") {
-        void this.navigateTo(entry.uri);
+        void this.navigateTo(entry.uri, entry.name);
       } else {
         this.showConfirm(entry);
       }
@@ -429,6 +538,10 @@ export class PhoneUI {
   // --- Helpers ---
 
   private extractFolderName(uri: string, parentUri: string): string {
+    // Check stored folder names first (used for Google Drive)
+    const storedName = this.folderNames.get(uri);
+    if (storedName) return storedName;
+
     if (uri.startsWith(parentUri + "/")) {
       const remainder = uri.slice(parentUri.length + 1);
       const slashIdx = remainder.indexOf("/");
@@ -439,6 +552,11 @@ export class PhoneUI {
   }
 
   private extractRelPath(uri: string): string {
+    // Google Drive URIs only have a file ID — no path to extract
+    if (uri.startsWith(GDRIVE_PREFIX)) {
+      return "Google Drive";
+    }
+
     const hashIdx = uri.indexOf("#");
     if (hashIdx !== -1) {
       const fragment = uri.slice(hashIdx + 1);
